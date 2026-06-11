@@ -1,0 +1,7 @@
+# Install once:  pip install pre-commit && pre-commit install
+# Then notebook outputs are stripped automatically on every commit.
+repos:
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout

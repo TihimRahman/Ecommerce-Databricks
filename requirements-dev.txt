@@ -1,0 +1,7 @@
+# Dev / test dependencies.
+# Run the unit tests with:  pip install -r requirements-dev.txt && pytest
+pyspark==3.5.1
+pytest>=8.0
+
+# Only needed to run the Delta-backed notebooks/merges locally (not the unit tests):
+# delta-spark==3.2.0

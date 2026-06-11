@@ -1,0 +1,143 @@
+# Databricks Asset Bundle — Ecommerce Lakehouse
+# Deploys the Bronze → Silver → Gold medallion pipeline as a single job.
+#
+#   databricks bundle validate            # check this config
+#   databricks bundle deploy -t dev       # upload notebooks + create the job
+#   databricks bundle run medallion_pipeline -t dev
+#
+# Docs: https://docs.databricks.com/dev-tools/bundles/
+
+bundle:
+  name: ecommerce-lakehouse
+
+# ---------------------------------------------------------------------------
+# Variables — adjust these instead of editing the job definition below.
+# ---------------------------------------------------------------------------
+variables:
+  catalog:
+    description: Unity Catalog holding the bronze/silver/gold schemas.
+    default: tihim_project
+  spark_version:
+    description: Databricks Runtime version (LTS recommended).
+    default: 15.4.x-scala2.12
+  node_type_id:
+    description: Cluster node type. AWS default shown — change for Azure/GCP.
+    default: m5d.large
+  ingest_concurrency:
+    description: How many source files the Bronze for-each ingests in parallel.
+    default: 3
+
+# ---------------------------------------------------------------------------
+# Targets — one workspace per environment. Fill in your workspace host.
+# ---------------------------------------------------------------------------
+targets:
+  dev:
+    mode: development        # prefixes resources with [dev <you>], pauses schedules
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com   # <-- TODO: set me
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com   # <-- TODO: set me
+
+# ---------------------------------------------------------------------------
+# Resources — the end-to-end medallion job.
+# ---------------------------------------------------------------------------
+resources:
+  jobs:
+    medallion_pipeline:
+      name: "Ecommerce Medallion Pipeline (Bronze → Silver → Gold)"
+
+      tags:
+        project: ecommerce-lakehouse
+        managed_by: asset-bundle
+
+      # Single shared job cluster for every task. SINGLE_USER access mode is
+      # required for Unity Catalog + Structured Streaming (foreachBatch / CDF).
+      job_clusters:
+        - job_cluster_key: pipeline_cluster
+          new_cluster:
+            spark_version: ${var.spark_version}
+            node_type_id: ${var.node_type_id}
+            data_security_mode: SINGLE_USER
+            autoscale:
+              min_workers: 1
+              max_workers: 2
+
+      tasks:
+        # --- Bronze ----------------------------------------------------------
+        # 1) Publish the dataset list (customers/orders/products) as a task value.
+        - task_key: bronze_parameters
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Bronze/Parameters.ipynb
+
+        # 2) Fan out: ingest each source file with Auto Loader. Iterates over the
+        #    "dataset" task value set by bronze_parameters; {{input.filename}}
+        #    feeds the notebook's `filename` widget.
+        - task_key: bronze_ingest
+          depends_on:
+            - task_key: bronze_parameters
+          for_each_task:
+            inputs: "{{tasks.bronze_parameters.values.dataset}}"
+            concurrency: ${var.ingest_concurrency}
+            task:
+              task_key: ingest_source_file
+              job_cluster_key: pipeline_cluster
+              notebook_task:
+                notebook_path: ./Bronze/Source_Bronze.ipynb
+                base_parameters:
+                  filename: "{{input.filename}}"
+
+        # --- Silver ----------------------------------------------------------
+        # Clean / validate / quarantine / upsert. All depend on Bronze ingest.
+        - task_key: silver_customers
+          depends_on:
+            - task_key: bronze_ingest
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Silver/Silver_Customers.ipynb
+
+        - task_key: silver_orders
+          depends_on:
+            - task_key: bronze_ingest
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Silver/Silver_Orders.ipynb
+
+        - task_key: silver_products
+          depends_on:
+            - task_key: bronze_ingest
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Silver/Silver_Products.ipynb
+
+        # --- Gold dimensions (SCD Type 2) ------------------------------------
+        # Each dim consumes the Change Data Feed of its matching Silver table.
+        - task_key: dim_customers
+          depends_on:
+            - task_key: silver_customers
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Gold/Dim_Customers.ipynb
+
+        - task_key: dim_products
+          depends_on:
+            - task_key: silver_products
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Gold/Dim_Products.ipynb
+
+        # --- Gold fact -------------------------------------------------------
+        # fact_orders reads silver.orders CDF and looks up the *active* rows in
+        # both dimensions, so it waits on the orders stream and both dims.
+        - task_key: fact_orders
+          depends_on:
+            - task_key: silver_orders
+            - task_key: dim_customers
+            - task_key: dim_products
+          job_cluster_key: pipeline_cluster
+          notebook_task:
+            notebook_path: ./Gold/Fct_Orders.ipynb

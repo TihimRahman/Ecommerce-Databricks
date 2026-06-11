@@ -1,0 +1,38 @@
+name: Validate Asset Bundle
+
+# Validates databricks.yml on every push / PR to main.
+#
+# Works out of the box: if no Databricks credentials are configured, the
+# validate step is skipped and the workflow passes. To turn it into a real
+# check, add two repository secrets (Settings → Secrets and variables → Actions)
+# and set a real workspace host in databricks.yml:
+#   DATABRICKS_HOST   e.g. https://your-workspace.cloud.databricks.com
+#   DATABRICKS_TOKEN  a Databricks personal access token
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validate bundle (dev target)
+        if: env.DATABRICKS_HOST != ''
+        run: databricks bundle validate -t dev
+
+      - name: Skipped (no Databricks credentials configured)
+        if: env.DATABRICKS_HOST == ''
+        run: echo "DATABRICKS_HOST/DATABRICKS_TOKEN secrets not set — skipping bundle validation. See workflow comments to enable."
